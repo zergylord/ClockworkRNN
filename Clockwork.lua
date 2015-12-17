@@ -1,40 +1,37 @@
 require 'nn'
 require 'ClockLin'
+require 'gnuplot'
 local Clockwork, parent = torch.class('nn.Clockwork', 'nn.Module')
 
 function Clockwork:__init(inputSize, outputSize, numClocks)
    parent.__init(self)
-   self.numClocks = numClocks
-   self.net = nn.Sequential()
-   local par = nn.ParallelTable()
-   self.linLayer = nn.ClockLin(inputSize,outputSize,'input')
-   self.recLayer = nn.ClockLin(outputSize,outputSize,'rec')
-   par:add(self.linLayer)
-   par:add(self.recLayer)
-   self.net:add(par)
-   self.net:add(nn.CAddTable())
-   self.net:add(nn.Tanh())
-
-   self.linMask = torch.ones(outputSize,inputSize) 
-   self.recMask = torch.ones(outputSize,outputSize)
-
-   self.gradInput = {}
+    self.numClocks = numClocks
+    self.num_tot = outputSize
    if outputSize % numClocks ~= 0 then
        error('inputs must be divisible by the number of clocks!')
    end
-   self.clockSize = outputSize / numClocks
-   self.mask = torch.zeros(outputSize,outputSize)
+    self.num_hid = outputSize/numClocks
+    self.num_in = inputSize
+   self.weight = torch.Tensor(outputSize,inputSize+outputSize):normal(0,.1)
+   self.bias = torch.Tensor(outputSize):normal(0,.1)
+   self.gradWeight = torch.Tensor(outputSize,inputSize + outputSize)
+   self.gradBias = torch.Tensor(outputSize)
+   self.numClocks = numClocks
+
+
+
+   self.output = torch.zeros(outputSize)
+   self.gradInput = {}
+   self.mask = torch.zeros(self.weight:size())
    for i=1,numClocks do
-       self.mask[{{(i-1)*self.clockSize+1,i*self.clockSize},
-                   {(i-1)*self.clockSize+1,numClocks*self.clockSize}}] = 1
+       self.mask[{{(i-1)*self.num_hid+1,i*self.num_hid},
+                   {(i-1)*self.num_hid+1,self.num_tot+self.num_in}}] = 1
    end
+   --self:reset()
 end
 
-function Clockwork:parameters()
-    return self.net:parameters()
-end
 --set time starting at 0
-function Clockwork:sett(t)
+function Clockwork:setTime(t)
     self.t = t
     local last
     for i=1,self.numClocks do
@@ -44,35 +41,60 @@ function Clockwork:sett(t)
           break
       end
     end
-    --print(t,last)
-    self.onClocks = last
-    self.recMask:copy(self.mask)
-    self.linMask:zero():add(1)
+    self.last = last
+      
 
-    local start,stop = self.onClocks*self.clockSize+1,self.numClocks*self.clockSize 
-    if start < stop then --noextra mask when all clocks on
-        self.recMask[{{start,stop},{}}] = 0
-        self.linMask[{{start,stop},{}}] = 0
-    end
-    self.linLayer.mask = self.linMask
-    self.linLayer.actMask = self.linMask[{{},1}]
-    self.recLayer.mask = self.recMask
+    local stop = last*self.num_hid 
+    self.mask = self.mask[{{1,stop},{}}]
+    self.act_mask = torch.zeros(self.num_tot):byte()
+    self.act_mask[{{1,stop}}] =1 
+    self.clock = nn.ClockLin(self.num_in+self.num_tot,stop)
+    self.clock.mask = self.mask:double()
+    self.clock.weight = self.weight[{{1,stop},{}}]
+    self.clock.gradWeight = self.gradWeight[{{1,stop},{}}]
+    self.clock.bias = self.bias[{{1,stop}}]
+    self.clock.gradBias = self.gradBias[{{1,stop}}]
+    self.net = nn.Sequential()
+    self.net:add(self.clock)
+    self.net:add(nn.Tanh())
 end
 
 function Clockwork:reset(stdv)
-    self.net:reset()
-    return  self
+   if stdv then
+      stdv = stdv * math.sqrt(3)
+   else
+      stdv = 1./math.sqrt(self.weight:size(2))
+   end
+   if nn.oldSeed then
+      for i=1,self.weight:size(1) do
+         self.weight:select(1, i):apply(function()
+            return torch.uniform(-stdv, stdv)
+         end)
+         self.bias[i] = torch.uniform(-stdv, stdv)
+      end
+   else
+      self.weight:uniform(-stdv, stdv)
+      self.bias:uniform(-stdv, stdv)
+   end
+
+   return self
 end
 
 
 function Clockwork:updateOutput(input)
-    self.output = self.net:forward(input)
-    local actMask = self.linMask[{{},1}]:ne(1)
-    self.output[actMask] = input[2][actMask]
+    self.output = input[2]:clone()
+    self.output[self.act_mask] = self.net:forward(torch.cat{input[2],input[1]})
+    --[[
+    gnuplot.bar(self.act_mask)
+    gnuplot.plotflush()
+    --]]
    return self.output
 end
 
 function Clockwork:updateGradInput(input, gradOutput)
-    self.gradInput = self.net:backward(input,gradOutput)
+    self.gradInput[2] = gradOutput:clone()
+    local outputs = self.net:backward(torch.cat{input[2],input[1]},gradOutput[self.act_mask])
+    self.gradInput[2][self.act_mask] = outputs[{{1,-self.num_in-1}}]
+    self.gradInput[1] = outputs[{{-self.num_in,-1}}]
    return self.gradInput
 end

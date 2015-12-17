@@ -5,37 +5,38 @@ require 'nngraph'
 require 'optim'
 require 'gnuplot'
 util = require 'util.model_utils'
+--target = torch.linspace(-1,1,50):cat(torch.linspace(-1,1,50))
+--target = torch.linspace(0,1,10)
 target = torch.load('music.t7')
-target:add(-.5):mul(2)
+--target:add(-.5):mul(2)
 in_pool = nn.Identity()()
 rec_pool = nn.Identity()()
 num_hid = 49
 --
 cw = nn.Clockwork(1,num_hid,7)
 layer = cw{in_pool,rec_pool}:annotate{name='clock'}
---[[
-inlin = nn.Linear(1,num_hid)(in_pool)
-reclin = nn.Linear(num_hid,num_hid)(rec_pool)
-layer = nn.Tanh()(nn.CAddTable(){inlin,reclin})
 --]]
-out_pool= nn.Linear(num_hid,1)(layer)
+--layer = nn.Tanh()(nn.Linear(num_hid+1,num_hid)(nn.JoinTable(1){in_pool,rec_pool}))
+local temp= nn.Linear(num_hid,1)
+--temp.weight:normal(0,.1)
+out_pool = temp(layer)
 network = nn.gModule({in_pool,rec_pool},{out_pool,layer})
 parameters, gradients = network:getParameters()
 network:zeroGradParameters()
 timer = torch.Timer()
-max_steps = 100
+max_steps = target:size()[1]
+local net_clones = util.clone_many_times(network,max_steps)
 for i,node in ipairs(network.forwardnodes) do
     if node.data.annotations.name == 'clock' then
         clock_node_ind = i
         break
     end
 end
-local net_clones = util.clone_many_times(network,max_steps)
 
 if clock_node_ind then
     print('setting clocks')
     for i=1,max_steps do
-        net_clones[i].forwardnodes[clock_node_ind].data.module:sett(i-1)
+        net_clones[i].forwardnodes[clock_node_ind].data.module:setTime(i-1)
     end
 end
 
@@ -44,32 +45,19 @@ local opfunc = function(x)
     if x ~= parameters then
         parameters:copy(x)
     end
-    prev_grad = torch.zeros(num_hid)
     network:zeroGradParameters()
     data = {}
     output = torch.zeros(max_steps)
-    rec = {}
-    rec[0] = torch.zeros(num_hid)
+    rec = torch.zeros(num_hid)
     for t = 1,max_steps do
-        --cw:sett(t-1)
-        data[t] = {torch.zeros(1),rec[t-1]}
-        output[t],rec[t] = unpack(net_clones[t]:forward(data[t]))
-        --[[
-        print(output)
-        gnuplot.plot(output)
-        gnuplot.plotflush()
-        os.execute('sleep 1')
-        --]]
+        data[t] = {torch.zeros(1),rec:clone()}
+        output[t],rec = unpack(net_clones[t]:forward(data[t]))
     end
-    loss = 0
+    local loss = 0
+    local prev_grad = torch.zeros(num_hid)
     for t = max_steps,1,-1 do
         loss = loss + mse_crit:forward(torch.Tensor{output[t]},torch.Tensor{target[t]})
         local grad = mse_crit:backward(torch.Tensor{output[t]},torch.Tensor{target[t]})
-        if prev_grad:norm() > 1e7 or prev_grad:norm() ~= prev_grad:norm() then
-           -- print(prev_grad)
-            print('crash')
-            os.exit()
-        end
         _,prev_grad = unpack(net_clones[t]:backward(data[t],{grad,prev_grad}))
     end
     return loss,gradients
@@ -89,7 +77,7 @@ for i = 1,1e5 do
     --print(gradients)
     --print(net_clones[1].forwardnodes[clock_node_ind].data.module.net:parameters()[3])
     if i % 1e3 == 0 then
-        print(i,cumloss,gradients:norm(),timer:time().real)
+        print(i,cumloss,parameters:norm(),gradients:norm(),timer:time().real)
         timer:reset()
         gnuplot.plot({target},{output})
         cumloss = 0
