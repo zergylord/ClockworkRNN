@@ -6,7 +6,7 @@ require 'gnuplot'
 input = nn.Identity()()
 rec = nn.Identity()()
 num_clocks = 7
-num_tot = 28
+num_tot = 7
 num_out = 1
 num_in = 1
 --hid = nn.Tanh()(nn.Linear(num_tot+num_in,num_tot)(nn.JoinTable(1){input,rec}))

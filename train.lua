@@ -11,7 +11,7 @@ target = torch.load('music.t7')
 --target:add(-.5):mul(2)
 in_pool = nn.Identity()()
 rec_pool = nn.Identity()()
-num_hid = 49
+num_hid = 7
 --
 cw = nn.Clockwork(1,num_hid,7)
 layer = cw{in_pool,rec_pool}:annotate{name='clock'}
